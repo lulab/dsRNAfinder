@@ -5,15 +5,43 @@
 ## Preparation 
 
 ### environment
+```shell
+# REDItools
+git clone https://github.com/BioinfoUNIBA/REDItools 
+mamba env create --name REDItools --file envs/mamba_env.yml
+# RNAfold
+mamba create -n py37 python=3.7 seaborn multiprocess bedtools=2.30.0 r-bedtoolsr bioconductor-iranges bioconductor-genomicranges r-argparse r-seqinr
+# IntaRNA
+mamba create -n IntaRNA -c conda-forge -c bioconda intarna bedtools=2.30.0 r-bedtoolsr bioconductor-iranges bioconductor-genomicranges r-argparse r-seqinr
+```
 
 ### reference
 ```shell
+# download reference from USCS
+https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz
+https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.chrom.sizes   
+
 gnFa="hg38.fa"
 chrSize="chrom.size"
 binSize=50
 binBed="hg38.bins.50.bed"
+
+bedtools makewindows -g ${chrSize} -w ${binSize} | awk '{print $1 "\t" $2 "\t" $3 "\t" "." "\t" "." "\t" "+"}'  > ${binBed}.tmp
+#add strand
+awk '{print $1 "\t" $2 "\t" $3 "\t" "." "\t" "." "\t" "-"}' ${binBed}.tmp >  ${binBed}.tmp2
+cat ${binBed}.tmp ${binBed}.tmp2 | sort -k1,1 -k2,2n > ${binBed}
+rm ${binBed}.tmp*
 ```
 
+### prepare input
+```shell
+dsRIP_1_input.bam
+dsRIP_1_IP.bam
+dsRIP_2_input.bam
+dsRIP_2_IP.bam
+dsRIP_3_input.bam
+dsRIP_3_IP.bam
+```
 
 ## RNA editing calling
 ### REDItools
@@ -55,7 +83,7 @@ extSize=25
 minLen=50
 maxLen=3000
 bash 2.getEERcluster.sh ${input} \
-			${chrSize} ${gnFa} ${binSize} ${binBed} ${tmpDir}
+			${chrSize} ${gnFa} ${binSize} ${binBed} ${tmpDir} \
 			${EERnum} ${mergeSize} ${extSize} ${minLen} ${maxLen}
 ```
 
@@ -75,59 +103,106 @@ bash 3.getEERconsensus.sh \
 ```shell
 # intra dsRNA
 bed="consensusEERcluster.bed"
-dsRIPid="dsRIP_id"
-input="dsRIP_hg38_dedup.bedgraph"
-bedtools coverage -a ${bed} -b ${input} -s > ${output.intra} 
+for sample in dsRIP-1-input dsRIP-1-IP dsRIP-2-input dsRIP-2-IP dsRIP-3-input dsRIP-3-IP
+do 
+		bedtools genomecov -ibam ${sample}.bam -strand + -bg -split \
+                | LC_COLLATE=C sort -k1,1V -k2,2n -k3,3n \
+                | grep chr | awk '{{print $1"\t"$2"\t"$3"\t"".""\t"$4"\t""+"}}' > ${sample}.pos 
+
+    bedtools genomecov -ibam ${sample}.bam -strand - -bg -split \
+                | LC_COLLATE=C sort -k1,1V -k2,2n -k3,3n \
+                | grep chr | awk '{{print $1"\t"$2"\t"$3"\t"".""\t"$4"\t""-"}}' > ${sample}.neg 
+
+    cat ${sample}.pos ${sample}.neg | sort -k1,1V -k2,2n -k3,3n > ${sample}.bedgraph 
+		bedtools coverage -a ${bed} -b ${sample}.bedgraph -s > ${sample}.EERcluster.coverage
+done
 
 # filter intra- dsRNA
-Rscript 4.EER_coverage_filter.R \
-					--ratio 0.5 \
-					--freq 0.5 \
-					--coc 3 \
-					--output intra_RNAfold/consensusEER_covfil.bed
+ratio=0.5
+freq=0.5
+cov=3
+sampleid="sample_id.txt"
+Rscript intra.EER_coverage_filter.R \
+					--ratio $ratio \
+					--freq $freq \
+					--cov $cov \
+					--bed consensusEERcluster.bed \
+					--sampleid $sampleid \
+					--input $indir \
+					--output concensusEER_covfil.bed
+sort -k1,1V -k2,2n -k3,3n consensusEER_covfil.bed > consensusEER_covfil_sort.bed        
 ```
 ### RNA fold
 ```shell
 bedtools getfasta -nameOnly -s \
 			 -fi ${gnFa} \
-       -bed intra_RNAfold/consensusEER_covfil.bed \
-       > intra_RNAfold/consensusEER_covfil.bed.fa
+       -bed intra_RNAfold/consensusEER_covfil_sort.bed \
+       > intra_RNAfold/consensusEER_covfil_sort.bed.fa
 
 shuffle_times=50
 seed=1234
 cores=16
-python 5.rnafold_dinushuffle_parallel.py \
+python intra.rnafold_dinushuffle_parallel.py \
         intra_RNAfold/consensusEER_covfil.bed.fa \
         ${shuffle_times} ${seed} \
         intra_RNAfold/consensusEER_covfil.bed.fa.csv \
-        ${cores} \
-				> intra_RNAfold/consensusEER_covfil.bed.fa.log 2>&1
+        ${cores} 
 rm $output/intra_RNAfold/${file}.fa_perm
 ```
 ### RNA fold filter
 ```shell
-6.RNAfold_filterIntra.R
+intraPairFrac=0.3
+intraPairLen=15
+intraMfeFdr=0.1
+adjMFE= -0.3
+inFdr="consensusEER_covfil_sort.bed.fa.csv"
+inBed="consensusEER_covfil_sort.bed"
+outBed="consensusEER_covfil_sort_rnafold.bed6"
+
+Rscript intra.RNAfold_filterIntra.R \
+				--inFdr $inFdr \
+				--inBed $inBed \
+				--intraPairFrac $intraPairFrac \
+				--intraPairLen $intraPairLen \
+				--intraMfeFdr $intraMfeFdr \
+				--adjMFE $adjMFE \
+				--outBed $outBed 
 ```
 
 ## Inter-dsRNA identification
 ### get sense-antisense pairs
 ```shell
 file="consensusEERcluster.bed"
-Rscript 4.getSenseAntisensePair.R \
+Rscript inter.getSenseAntisensePair.R \
 	--inBed ${file} \
 	--outDir inter_IntaRNA
 ```
 
-### filter reads coverage
+### filter dsRIP coverage
 ```shell
 # inter dsRNA
 bed_pos="intersection_overlap.+.bed"
 bed_neg="intersection_overlap.-.bed"
-bedtools coverage -a ${bed_pos} -b ${input} -s > ${output.inter_pos} 
-bedtools coverage -a ${bed_neg} -b ${input} -s > ${output.inter_neg}
-      
+for sample in dsRIP-1-input dsRIP-1-IP dsRIP-2-input dsRIP-2-IP dsRIP-3-input dsRIP-3-IP
+do
+			bedtools coverage -a ${bed_pos} -b ${sample}.bedgraph -s > ${sample}.+ 
+			bedtools coverage -a ${bed_neg} -b ${sample}.bedgraph -s > ${sample}.-
+done
 # filter intra- and inter- dsRNA
-Rscript 5.EER_cov_filter.R
+ratio=0.6
+freq=0.3
+cov=3
+Rscript inter.EER_coverage_filter.R \
+					--gnFa $gnFa \
+					--input $indir \
+					--sampleid $sampleid \
+					--input $indir \
+					--ratio $ratio \
+					--freq $freq \
+					--cov $cov \
+					--output $outdir 
+
+sort -k1,1V -k2,2n -k3,3n inter_IntaRNA/intersection_overlap_covfil.bed > inter_IntaRNA/intersection_overlap_covfil_sort.bed
 ```
 
 ### IntaRNA
@@ -135,7 +210,7 @@ Rscript 5.EER_cov_filter.R
 cores=16
 start=n1
 end=n2
-bash 8.IntaRNA.sh inter_IntaRNA $cores $n1 $n2
+bash inter.IntaRNA.sh inter_IntaRNA $cores $n1 $n2
 head -n 1 $output/result/IntaRNA_1.txt > $output/IntaRNA.txt
 for i in `ls $output/result | grep -v MYPAIRMINE | grep -v log | cut -d "." -f 1 | cut -d "_" -f 2 | sort -n`
 do
@@ -146,6 +221,15 @@ done
 
 ### IntaRNA filter
 ```shell
+inFile="IntaRNA.txt"
+interPairFrac <- 0.1
+interPairLen <- 15
+outFile="IntaRNA_filter.txt"
+Rscript 10.IntaRNA_filterInter.R \
+					--inFile $inFile \
+					--interPairFrac $interPairFrac \
+					--interPairLen $interPairLen \
+					--outFile $outFile
 ```
 
 
