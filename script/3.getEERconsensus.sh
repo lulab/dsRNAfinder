@@ -1,7 +1,3 @@
-
-
-
-
 indir=$1
 outdir=$2
 file=$3
