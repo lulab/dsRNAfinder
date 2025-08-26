@@ -1,5 +1,3 @@
-
-
 outDir=$1
 cores=$2
 pair_start=$3
